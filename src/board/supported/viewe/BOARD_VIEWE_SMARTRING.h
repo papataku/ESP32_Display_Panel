@@ -12,6 +12,9 @@
 
 #pragma once
 
+#include <driver/gpio.h>
+#include "esp_lcd_panel_io.h"
+
 // *INDENT-OFF*
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -246,7 +249,7 @@
 /**
  * @brief Backlight control type selection
  */
-#define ESP_PANEL_BOARD_BACKLIGHT_TYPE          (ESP_PANEL_BACKLIGHT_TYPE_PWM_LEDC)
+#define ESP_PANEL_BOARD_BACKLIGHT_TYPE          (ESP_PANEL_BACKLIGHT_TYPE_CUSTOM)
 
 #if (ESP_PANEL_BOARD_BACKLIGHT_TYPE == ESP_PANEL_BACKLIGHT_TYPE_SWITCH_GPIO) || \
     (ESP_PANEL_BOARD_BACKLIGHT_TYPE == ESP_PANEL_BACKLIGHT_TYPE_SWITCH_EXPANDER) || \
@@ -259,6 +262,102 @@
     #define ESP_PANEL_BOARD_BACKLIGHT_ON_LEVEL  (1)     // Active level, 0: low, 1: high
 
 #endif // ESP_PANEL_BOARD_BACKLIGHT_TYPE
+
+#if (ESP_PANEL_BOARD_BACKLIGHT_TYPE == ESP_PANEL_BACKLIGHT_TYPE_CUSTOM)
+
+#define ESP_PANEL_BOARD_BACKLIGHT_IO        (40)
+
+// SH8601 用 tx_param 相当のヘルパー
+static inline esp_err_t viewe_sh8601_tx_param(esp_lcd_panel_io_handle_t io,
+                                              int lcd_cmd,
+                                              const void *param,
+                                              size_t param_size)
+{
+    // QSPI のときは SH8601 ドライバと同じように 32bit コマンドに変換
+#if (ESP_PANEL_BOARD_LCD_BUS_TYPE == ESP_PANEL_BUS_TYPE_QSPI)
+    lcd_cmd &= 0xff;
+    lcd_cmd <<= 8;
+    lcd_cmd |= (0x02U << 24);   // LCD_OPCODE_WRITE_CMD と同じ値
+#endif
+    return esp_lcd_panel_io_tx_param(io, lcd_cmd, param, param_size);
+}
+
+#define ESP_PANEL_BOARD_BACKLIGHT_CUSTOM_FUNCTION(percent, user_data)              \
+{                                                                                  \
+    auto board = static_cast<Board *>(user_data);                                  \
+    if (!board) {                                                                  \
+        ESP_UTILS_LOGE("BL: board is null");                                     \
+        return false;                                                              \
+    }                                                                              \
+                                                                                   \
+    auto lcd = board->getLCD();                                                    \
+    if (!lcd) {                                                                    \
+        ESP_UTILS_LOGE("BL: lcd is null");                                       \
+        return false;                                                              \
+    }                                                                              \
+                                                                                   \
+    auto bus = lcd->getBus();                                                      \
+    if (!bus) {                                                                    \
+        ESP_UTILS_LOGE("BL: bus is null");                                       \
+        return false;                                                              \
+    }                                                                              \
+                                                                                   \
+    esp_lcd_panel_io_handle_t io = bus->getControlPanelHandle();                   \
+    if (!io) {                                                                     \
+        ESP_UTILS_LOGE("BL: io handle is null");                                 \
+        return false;                                                              \
+    }                                                                              \
+                                                                                   \
+    /* 0〜100% を 0〜255 に変換 */                                                 \
+    uint8_t value = (uint8_t)((percent * 255) / 100);                              \
+    ESP_UTILS_LOGD("BL: set brightness percent=%d, value=0x%02X",                \
+                   (int)percent, (int)value);                                      \
+                                                                                   \
+    /* （必要なら）GPIO 40 で電源 ON/OFF */                                        \
+    do {                                                                           \
+        int bl_io = ESP_PANEL_BOARD_BACKLIGHT_IO;                                  \
+        if (bl_io >= 0) {                                                          \
+            gpio_config_t io_conf = {};                                            \
+            io_conf.pin_bit_mask = (1ULL << bl_io);                                \
+            io_conf.mode = GPIO_MODE_OUTPUT;                                       \
+            io_conf.pull_up_en = GPIO_PULLUP_DISABLE;                              \
+            io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;                          \
+            io_conf.intr_type = GPIO_INTR_DISABLE;                                 \
+            gpio_config(&io_conf);                                                 \
+            gpio_set_level((gpio_num_t)bl_io, (percent > 0) ? 1 : 0);              \
+        }                                                                          \
+    } while (0);                                                                   \
+                                                                                   \
+    esp_err_t err;                                                                 \
+                                                                                   \
+    /* ★ SH8601 の tx_param と同じルートで FE/C4/51 を送る */                     \
+    uint8_t p;                                                                     \
+                                                                                   \
+    p = 0x00;                                                                      \
+    err = viewe_sh8601_tx_param(io, 0xFE, &p, 1);                                  \
+    if (err != ESP_OK) {                                                           \
+        ESP_UTILS_LOGE("BL: tx_param(0xFE) failed: 0x%x", (int)err);             \
+        return false;                                                              \
+    }                                                                              \
+                                                                                   \
+    p = 0x80;                                                                      \
+    err = viewe_sh8601_tx_param(io, 0xC4, &p, 1);                                  \
+    if (err != ESP_OK) {                                                           \
+        ESP_UTILS_LOGE("BL: tx_param(0xC4) failed: 0x%x", (int)err);             \
+        return false;                                                              \
+    }                                                                              \
+                                                                                   \
+    err = viewe_sh8601_tx_param(io, 0x51, &value, 1);                              \
+    if (err != ESP_OK) {                                                           \
+        ESP_UTILS_LOGE("BL: tx_param(0x51) failed: 0x%x", (int)err);             \
+        return false;                                                              \
+    }                                                                              \
+                                                                                   \
+    return true;                                                                   \
+}
+
+#endif // ESP_PANEL_BOARD_BACKLIGHT_TYPE
+
 
 /**
  * @brief Backlight idle state configuration (0/1)
